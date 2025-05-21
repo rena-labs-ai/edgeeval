@@ -407,3 +407,12 @@ MTL_CAPTURE_ENABLED=1 python3 mlx_profiler.py
    - Navigate to your trace directory (e.g., `example_trace/`).
    - Select the folder ending with `.gputrace` (it appears as a package/folder).
    - Click `Open`.
+
+Alternative method:
+
+1. **Open Trace from Finder**
+   - Navigate to the `mlx` directory in Finder.
+   - Locate the `.gputrace` folder (it appears as a package/folder).
+   - Double-click the `.gputrace` folder to open it directly in Xcode Instruments.
+
+
