@@ -6,11 +6,20 @@ A benchmarking tool for evaluating inference engine performance on MacOS systems
 
 - Synthetic and file-based dataset generation
 - Concurrent request processing with rate limiting
-- System metrics collection (CPU, memory, disk I/O, network I/O)
+- System metrics collection (CPU, GPU, memory)
 - Process-specific metrics monitoring
 - Warmup phase support
 - Detailed latency statistics
 - JSON output format for results
+
+## Prerequisites
+
+1. Python 3.8 or higher
+2. A running inference engine server (e.g., Ollama, MLC-LLM, etc.) on a separate terminal before using the benchmark tool
+   - For Ollama: Run `ollama serve` in a separate terminal
+   - For MLC-LLM: Run `python3 -m mlc_llm serve` in a separate terminal
+   - Make sure the server is accessible at the host and port specified in the benchmark command
+
 
 ## Installation
 
