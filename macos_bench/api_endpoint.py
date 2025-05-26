@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 from typing_extensions import Self
 
 from macos_bench.request_record import Metrics, RequestRecord, ServerMetrics
-from mlc_llm.support import logging
+import macos_bench.support.logging as logging
 
 logger = logging.getLogger(__name__)
 

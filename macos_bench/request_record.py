@@ -5,8 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd  # pylint: disable=import-error
 from pydantic import BaseModel
 
-from mlc_llm.protocol.openai_api_protocol import ChatCompletionRequest
-from mlc_llm.support import logging
+from macos_bench.protocol.openai_api_protocol import ChatCompletionRequest
+import macos_bench.support.logging as logging
 
 logger = logging.getLogger(__name__)
 

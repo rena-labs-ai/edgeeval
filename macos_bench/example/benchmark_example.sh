@@ -14,7 +14,7 @@ export TOKENIZER_NAME="tinyllama" # "mlc-ai/Llama-3.2-3B-Instruct-q4f16_0-MLC"
 export SERVER_ADDR="127.0.0.1"
 export SERVER_PORT="11434" # "8000"
 
-export SHAREGPT_PATH="$PWD/ShareGPT_V3_unfiltered_cleaned_split.json"
+export SHAREGPT_PATH="$PWD/datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
 export API_ENDPOINT="ollama" # mlc, ollama
 
 sudo python3 -m macos_bench \

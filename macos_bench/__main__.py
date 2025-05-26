@@ -10,7 +10,6 @@ import requests
 from transformers import AutoTokenizer  # pylint: disable=import-error
 import psutil
 
-import mlc_llm
 from macos_bench.api_endpoint import SUPPORTED_BACKENDS, create_api_endpoint
 from macos_bench.dataset import SUPPORTED_DATASET, Dataset, create_dataset
 from macos_bench.request_processor import (
@@ -25,9 +24,9 @@ from macos_bench.request_record import (
     pretty_print_report,
 )
 from macos_bench.macos_metrics import MacOSMetricsCollector
-from mlc_llm.cli.serve import EngineConfigOverride
-from mlc_llm.serve import EngineConfig
-from mlc_llm.support import argparse, logging
+
+import macos_bench.support.argparse as argparse
+import macos_bench.support.logging as logging
 
 logging.enable_logging()
 logger = logging.getLogger(__name__)
@@ -55,38 +54,6 @@ def _parse_request_rate(request_rate_str: Optional[str]) -> Optional[List[np.flo
     return results
 
 
-def _parse_mlc_engine_config(config_str: Optional[str]) -> EngineConfig:
-    if config_str is None:
-        return None
-    engine_config_override = EngineConfigOverride.from_str(config_str)
-    return EngineConfig(
-        tensor_parallel_shards=engine_config_override.tensor_parallel_shards,
-        max_num_sequence=engine_config_override.max_num_sequence,
-        max_total_sequence_length=engine_config_override.max_total_seq_length,
-        prefill_chunk_size=engine_config_override.prefill_chunk_size,
-        sliding_window_size=engine_config_override.sliding_window_size,
-        attention_sink_size=engine_config_override.attention_sink_size,
-        max_history_size=engine_config_override.max_history_size,
-        gpu_memory_utilization=engine_config_override.gpu_memory_utilization,
-        spec_draft_length=engine_config_override.spec_draft_length,
-        prefill_mode=engine_config_override.prefill_mode,
-        prefix_cache_max_num_recycling_seqs=engine_config_override.prefix_cache_max_num_recycling_seqs,  # pylint: disable=line-too-long
-        prefix_cache_mode=engine_config_override.prefix_cache_mode,
-    )
-
-
-def _launch_mlc_server(args: argparse.argparse.Namespace):
-    return mlc_llm.serve.PopenServer(
-        model=args.tokenizer,
-        mode="server",
-        model_lib=args.mlc_model_lib,
-        enable_tracing=False,
-        host=args.host,
-        port=args.port,
-        engine_config=args.mlc_engine_config,
-    )
-
-
 def run_pipeline(
     pipeline: RequestProcessor,
     dataset: Dataset,
@@ -99,8 +66,8 @@ def run_pipeline(
     
     # Find the MLC server processes
     server_pid = None
-    print("\nDebug: Looking for inference server process...")
-    print(f"Debug: Target port: {args.port}")
+    # print("\nDebug: Looking for inference server process...")
+    # print(f"Debug: Target port: {args.port}")
     
     # First try to find by port
     try:
@@ -181,21 +148,8 @@ def run_pipeline(
     return report, sorted_requests
 
 
-def query_mlc_server_metrics(host: str, port: int):
-    """Try to get the MLC server metrics whenever it exists."""
-    try:
-        r = requests.post(f"http://{host}:{port}/debug/dump_engine_metrics", json={}, timeout=10)
-        if r.status_code == 200:
-            print(f"MLC server metrics: {r.json()}")
-    except Exception:  # pylint: disable=broad-exception-caught
-        pass
-
-
 def main(args: argparse.argparse.Namespace):
     """Main benchmark entrance."""
-    mlc_server = None
-    if args.mlc_model_lib:
-        mlc_server = _launch_mlc_server(args)
     if args.num_requests <= 0:
         raise ValueError("Number of requests to benchmark must be positive.")
 
@@ -223,7 +177,6 @@ def main(args: argparse.argparse.Namespace):
             ]
             reports.append(report)
             pretty_print_report(report)
-        query_mlc_server_metrics(args.host, args.port)
 
         # Construct data frame
         df = convert_reports_to_df(reports)
@@ -238,11 +191,7 @@ def main(args: argparse.argparse.Namespace):
                 json.dump(alltime_records, file, indent=4)
             logger.info("Debug log dumped to file %s", debug_dump_filepath)
 
-    if mlc_server is not None:
-        with mlc_server:
-            _main()
-    else:
-        _main()
+    _main()
 
 
 if __name__ == "__main__":
@@ -437,11 +386,6 @@ if __name__ == "__main__":
         "When specified, the server is automatic launched and no external server launch is needed.",
     )
     parser.add_argument(
-        "--mlc-engine-config",
-        type=_parse_mlc_engine_config,
-        help="The engine config used when launch MLC server.",
-    )
-    parser.add_argument(
         "--cuda-profile",
         default=False,
         action="store_true",
@@ -466,7 +410,7 @@ if __name__ == "__main__":
         "--output",
         "-o",
         type=str,
-        default="mlc_benchmark.csv",
+        default="benchmark.csv",
         help="The path of the output file where to dump the benchmark results.",
     )
 

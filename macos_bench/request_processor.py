@@ -17,12 +17,13 @@ from transformers import AutoTokenizer  # pylint: disable=import-error
 from macos_bench.api_endpoint import APIEndPoint
 from macos_bench.dataset import Dataset
 from macos_bench.request_record import GroupedRequestRecord, RequestRecord
-from mlc_llm.protocol.openai_api_protocol import (
+from macos_bench.protocol.openai_api_protocol import (
     ChatCompletionMessage,
     ChatCompletionRequest,
     DebugConfig,
 )
-from mlc_llm.support import logging
+
+import macos_bench.support.logging as logging
 
 logger = logging.getLogger(__name__)
 
@@ -225,7 +226,7 @@ class MetricAnalyzer(RequestProcessor):  # pylint: disable=too-few-public-method
                 assert request_record.error_msg is not None
                 continue
             
-            print(f"Request record: {request_record}")
+            # print(f"Request record: {request_record}")
 
             # If we already have token counts from Ollama, use those
             if metrics.output_tokens is not None and metrics.input_tokens is not None:
