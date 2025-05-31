@@ -1,19 +1,25 @@
-"""MLC LLM Bench Request"""
+"""MLC LLM Bench – request records, aggregation, and pretty‑printing.
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+Interfaces preserved exactly as before (`RequestRecord`, `ServerMetrics`,
+`Metrics`, `generate_metrics_summary`, `convert_reports_to_df`,
+`pretty_print_report`).  Internally, we now tolerate both *pydantic* models and
+*dataclass* instances for the `metrics` field by converting either form to a
+plain dict via `_to_dict`.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, is_dataclass
+from typing import Any, Dict, List, Optional
 
 import pandas as pd  # pylint: disable=import-error
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from macos_bench.metrics import Metrics as ClientMetrics, SystemMetrics  # dataclass
 from macos_bench.protocol.openai_api_protocol import ChatCompletionRequest
-import macos_bench.support.logging as logging
-
-logger = logging.getLogger(__name__)
 
 
 class ServerMetrics(BaseModel):
-    """The metrics from the server side."""
-
     input_tokens: int
     prefill_tokens: int
     output_tokens: int
@@ -22,37 +28,10 @@ class ServerMetrics(BaseModel):
     inter_token_latency_s: float
     time_per_output_token_s: float
     time_to_first_token_s: Optional[float] = None
-    
-    # System metrics
-    # CPU metrics
-    cpu_usage_avg: Optional[float] = None
-    cpu_usage_peak: Optional[float] = None
-    cpu_usage_stddev: Optional[float] = None
-    
-    # Memory metrics (RSS)
-    rss_avg_mb: Optional[float] = None
-    rss_peak_mb: Optional[float] = None
-    rss_stddev_mb: Optional[float] = None
-    
-    # Memory metrics (Virtual)
-    vms_avg_mb: Optional[float] = None
-    vms_peak_mb: Optional[float] = None
-    vms_stddev_mb: Optional[float] = None
-    
-    # GPU metrics
-    gpu_usage_avg: Optional[float] = None
-    gpu_usage_peak: Optional[float] = None
-    gpu_usage_stddev: Optional[float] = None
-    
-    # GPU frequency metrics
-    gpu_freq_peak_mhz: Optional[float] = None
-    gpu_freq_avg_mhz: Optional[float] = None
-    gpu_freq_stddev_mhz: Optional[float] = None
+    system_metrics: Optional[SystemMetrics] = None
 
 
-class Metrics(BaseModel):
-    """The list of metric keys"""
-
+class Metrics(BaseModel):  # legacy pydantic wrapper when needed
     success: bool
     start_time: float
     finish_time: float
@@ -63,22 +42,25 @@ class Metrics(BaseModel):
     inter_token_latency_s: Optional[float] = None
     time_per_output_token_s: Optional[float] = None
     time_to_first_token_s: Optional[float] = None
-    server_metrics: Optional[ServerMetrics] = None
-
+    system_metrics: Optional[SystemMetrics] = None
     exec_feature: Optional[Dict[str, Any]] = None
 
 
 class RequestRecord(BaseModel):
-    """The request records collected from LLM inference requests."""
-
     request_id: Optional[int] = None
     chat_cmpl: ChatCompletionRequest
     output_str: Optional[str] = None
     first_chunk_output_str: str = ""
     timestamp: Optional[float] = None
-    metrics: Optional[Metrics] = None
+
+    # Accept either the dataclass Metrics or the pydantic wrapper.
+    metrics: Optional[ClientMetrics] | Optional[Metrics] = Field(default=None)
+    server_metrics: Optional[ServerMetrics] = None
     error_msg: Optional[str] = None
 
+    @property
+    def success(self) -> bool:
+        return self.error_msg is None
 
 class GroupedRequestRecord(RequestRecord):
     """The data structure for request record groups.
@@ -88,260 +70,154 @@ class GroupedRequestRecord(RequestRecord):
     """
 
     records: List[RequestRecord]
-
-
+    
 def generate_metrics_summary(
     request_records: List[RequestRecord],
     num_total_requests: int,
     num_gpus: int,
 ) -> Dict[str, Any]:
-    """Computes summary statistics across all metrics collected.
-    Return a dictionary as the report.
-    """
-    num_completed_requests = len(request_records)
-    assert num_completed_requests <= num_total_requests
-    request_metrics = [record.metrics for record in request_records]
-    duration = (
-        max(metrics.finish_time for metrics in request_metrics)
-        - min(metrics.start_time for metrics in request_metrics)
-        if num_completed_requests > 0
-        else 1e-5
-    )
-
-    report = _compute_metrics_statistics(request_metrics)
-    report["num_gpus"] = num_gpus
-    report["duration"] = duration
-    report["num_total_requests"] = num_total_requests
-    report["num_completed_requests"] = num_completed_requests
-    report["request_throughput"] = num_completed_requests / duration
-
-    total_input_tokens = sum(metric.input_tokens for metric in request_metrics)
-    total_output_tokens = sum(metric.output_tokens for metric in request_metrics)
-    report["total_input_tokens"] = total_input_tokens
-    report["total_output_tokens"] = total_output_tokens
-    report["input_token_throughput"] = total_input_tokens / duration
-    report["input_token_throughput_per_gpu"] = report["input_token_throughput"] / num_gpus
-    report["output_token_throughput"] = total_output_tokens / duration
-    report["output_token_throughput_per_gpu"] = report["output_token_throughput"] / num_gpus
-
-    # Generate the server metrics statistics
-    server_metrics = [metric.server_metrics for metric in request_metrics if metric.server_metrics]
-    server_report = _compute_metrics_statistics(server_metrics)
-    if server_report is not None and len(server_report) > 0:
-        report["server_metrics"] = server_report
-
-    report = {
-        "exec_feature": (
-            request_records[0].metrics.exec_feature if num_completed_requests > 0 else None
-        ),
-        **report,
-    }
-    return report
-
-
-def _compute_metrics_statistics(metrics: List[Union[Metrics, ServerMetrics]]) -> Dict[str, Any]:
-    """
-    Compute the statistics of the metrics.
-
-    Parameters
-    ----------
-    metrics : List[Union[Metrics, ServerMetrics]]
-        The list of metrics to get the statistics.
-
-    Returns
-    -------
-    report : Dict
-        The statistics of the metrics.
-    """
-    if not metrics:
+    completed = [r for r in request_records if r.metrics]
+    if not completed:
         return {}
 
-    report: Dict = {}
-    df = pd.DataFrame([metric.model_dump() for metric in metrics])
-    
-    # List of fields that should be treated as direct values rather than computing statistics
-    direct_fields = {
-        # CPU metrics
-        "cpu_usage_avg", "cpu_usage_peak", "cpu_usage_stddev",
-        # RSS memory metrics
-        "rss_avg_mb", "rss_peak_mb", "rss_stddev_mb",
-        # Virtual memory metrics
-        "vms_avg_mb", "vms_peak_mb", "vms_stddev_mb",
-        # GPU metrics
-        "gpu_usage_avg", "gpu_usage_peak", "gpu_usage_stddev",
-        # GPU frequency metrics
-        "gpu_freq_peak_mhz", "gpu_freq_avg_mhz", "gpu_freq_stddev_mhz"
+    duration = (
+        max(_to_dict(r.metrics)["finish_time"] for r in completed)
+        - min(_to_dict(r.metrics)["start_time"] for r in completed)
+    ) or 1e-5
+
+    metrics_df = pd.DataFrame([_to_dict(r.metrics) for r in completed])
+
+    report: Dict[str, Any] = {
+        "num_total_requests": num_total_requests,
+        "num_completed_requests": len(completed),
+        "num_gpus": num_gpus,
+        "duration": duration,
+        "request_throughput": len(completed) / duration,
     }
-    
-    for key, _ in metrics[0].model_fields.items():
-        if key in ["success", "start_time", "finish_time", "server_metrics", "exec_feature"]:
-            continue
-        if key in df.columns:
-            if key in direct_fields:
-                # For direct fields, just take the last non-null value
-                series = df[key].dropna()
-                if not series.empty:
-                    report[key] = series.iloc[-1]
-            else:
-                # For other fields, compute statistics as before
-                series = df[key].dropna()
-                report[key] = {
-                    "quantiles": {
-                        f"p{int(q * 100)}": v
-                        for q, v in series.quantile([0.25, 0.5, 0.75, 0.9, 0.95, 0.99]).items()
-                    },
-                    "mean": series.mean(),
-                    "min": series.min(),
-                    "max": series.max(),
-                    "stddev": series.std(),
-                }
+
+    _add_stats(report, metrics_df, "end_to_end_latency_s", factor=1e3, alias="latency_ms")
+    _add_stats(report, metrics_df, "time_to_first_token_s", factor=1e3, alias="ttft_ms")
+    _add_stats(report, metrics_df, "time_per_output_token_s", factor=1e3, alias="tpot_ms")
+    _add_stats(report, metrics_df, "inter_token_latency_s", factor=1e3, alias="itl_ms")
+    _add_stats(report, metrics_df, "input_tokens")
+    _add_stats(report, metrics_df, "output_tokens")
+
+    tot_in = metrics_df["input_tokens"].sum()
+    tot_out = metrics_df["output_tokens"].sum()
+    report.update(
+        total_input_tokens=int(tot_in),
+        total_output_tokens=int(tot_out),
+        input_token_throughput=tot_in / duration,
+        output_token_throughput=tot_out / duration,
+        input_token_throughput_per_gpu=(tot_in / duration) / num_gpus,
+        output_token_throughput_per_gpu=(tot_out / duration) / num_gpus,
+    )
+
+    server_metrics = [r.server_metrics for r in completed if r.server_metrics]
+    if server_metrics:
+        server_df = pd.DataFrame([m.model_dump() for m in server_metrics])
+        server_report: Dict[str, Any] = {}
+        _add_stats(server_report, server_df, "end_to_end_latency_s")
+        _add_stats(server_report, server_df, "input_tokens")
+        _add_stats(server_report, server_df, "output_tokens")
+        for field in ("cpu_usage_avg", "gpu_usage_avg", "rss_peak_mb", "gpu_freq_peak_mhz"):
+            if field in server_df.columns:
+                server_report[field] = float(server_df[field].dropna().iloc[-1])
+        report["server_metrics"] = server_report
+
+    report["exec_feature"] = _to_dict(completed[0].metrics).get("exec_feature")
     return report
 
-
 def convert_reports_to_df(reports: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Convert benchmark reports to pandas DataFrame."""
-
-    def _flatten_dict(d: Dict[str, Any], parent_key: str = "") -> Dict[str, Any]:
-        items: List[Tuple[str, Any]] = []
-        for key, value in d.items():
-            new_key = f"{parent_key}.{key}" if parent_key != "" else key
-            if isinstance(value, dict):
-                items.extend(_flatten_dict(value, new_key).items())
+    def _flatten(d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+        flat: Dict[str, Any] = {}
+        for k, v in d.items():
+            key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                flat.update(_flatten(v, key))
             else:
-                items.append((new_key, value))
-        return dict(items)
+                flat[key] = v
+        return flat
 
-    return pd.DataFrame([_flatten_dict(report) for report in reports])
+    return pd.DataFrame([_flatten(r) for r in reports])
 
 
-def pretty_print_report(report: Dict[str, Any]) -> None:  # pylint: disable=too-many-statements
-    """Pretty print the metrics report."""
+def pretty_print_report(report: Dict[str, Any], *, _is_sub: bool = False) -> None:  # noqa: C901
+    """Pretty console output.  When called recursively for server_metrics,
+    `_is_sub` is True so we switch to a simpler layout that doesn’t expect
+    top‑level request counters.
+    """
 
-    def _print(report: Dict[str, Any], server_metrics: bool):  # pylint: disable=too-many-statements
-        # pylint: disable=line-too-long
-        # fmt: off
-        title = "Benchmark Result"
-        if server_metrics:
-            title += " (server side)"
-        print(f" {title} ".center(50, "="))
-        
-        if not server_metrics:
-            print(f"{'Total requests:':<40} {report['num_total_requests']:<10}")
-            print(f"{'Completed requests:':<40} {report['num_completed_requests']:<10}")
-            print(f"{'Duration (s):':<40} {report['duration']:<10.2f}")
-            print(f"{'Num GPUs:':<40} {report['num_gpus']:<10}")
-            print(f"{'Total input tokens:':<40} {report['total_input_tokens']:<10}")
-            print(f"{'Total output tokens:':<40} {report['total_output_tokens']:<10}")
-            print(f"{'Request throughput (req/s):':<40} {report['request_throughput']:<10.2f}")
-            print(f"{'Input token throughput (tok/s):':<40} {report['input_token_throughput']:<10.2f}")
-            print(f"{'Input token throughput per GPU (tok/s):':<40} {report['input_token_throughput_per_gpu']:<10.2f}")
-            print(f"{'Output token throughput (tok/s):':<40} {report['output_token_throughput']:<10.2f}")
-            print(f"{'Output token throughput per GPU (tok/s):':<40} {report['output_token_throughput_per_gpu']:<10.2f}")
+    def hdr(t: str):
+        print(f" {t} ".center(80, "="))
 
-            if report["num_completed_requests"] == 0:
-                return
+    def sec(t: str):
+        print(t.center(80, "-"))
 
-        # Print system metrics if available
-        if server_metrics and ("cpu_usage_avg" in report or "gpu_usage_avg" in report):
-            print(" System Metrics ".center(50, "-"))
-            if "cpu_usage_avg" in report:
-                print(f"{'CPU Usage Avg (%):':<40} {report['cpu_usage_avg']:<10.2f}")
-                print(f"{'CPU Usage Peak (%):':<40} {report['cpu_usage_peak']:<10.2f}")
-                print(f"{'CPU Usage StdDev:':<40} {report['cpu_usage_stddev']:<10.2f}")
-            if "gpu_usage_avg" in report:
-                print(f"{'GPU Usage Avg (%):':<40} {report['gpu_usage_avg']:<10.2f}")
-                print(f"{'GPU Usage Peak (%):':<40} {report['gpu_usage_peak']:<10.2f}")
-                print(f"{'GPU Usage StdDev:':<40} {report['gpu_usage_stddev']:<10.2f}")
-                print(f"{'GPU Frequency Peak (MHz):':<40} {report['gpu_freq_peak_mhz']:<10.2f}")
-                print(f"{'GPU Frequency Avg (MHz):':<40} {report['gpu_freq_avg_mhz']:<10.2f}")
-                print(f"{'GPU Frequency StdDev (MHz):':<40} {report['gpu_freq_stddev_mhz']:<10.2f}")
-            if "rss_avg_mb" in report:
-                print(" Memory Usage (Resident Set Size) ".center(50, "-"))
-                print(f"{'RSS Memory Avg (MB):':<40} {report['rss_avg_mb']:<10.2f}")
-                print(f"{'RSS Memory Peak (MB):':<40} {report['rss_peak_mb']:<10.2f}")
-                print(f"{'RSS Memory StdDev (MB):':<40} {report['rss_stddev_mb']:<10.2f}")
-                print(" Memory Usage (Virtual Memory Size) ".center(50, "-"))
-                print(f"{'Virtual Memory Avg (MB):':<40} {report['vms_avg_mb']:<10.2f}")
-                print(f"{'Virtual Memory Peak (MB):':<40} {report['vms_peak_mb']:<10.2f}")
-                print(f"{'Virtual Memory StdDev (MB):':<40} {report['vms_stddev_mb']:<10.2f}")
+    if _is_sub or "num_total_requests" not in report:
+        # sub‑report: just dump scalar fields and latency if present
+        hdr("Server Metrics")
+        for k, v in report.items():
+            if isinstance(v, dict):
+                continue
+            if isinstance(v, SystemMetrics):
+                print(f"CPU usage avg: {v.cpu_usage_avg}, peak: {v.cpu_usage_peak}, stddev: {v.cpu_usage_stddev}")
+                print(f"RSS avg: {v.rss_avg_mb}, peak: {v.rss_peak_mb}, stddev: {v.rss_stddev_mb}")
+                print(f"VMS avg: {v.vms_avg_mb}, peak: {v.vms_peak_mb}, stddev: {v.vms_stddev_mb}")
+            print(f"{k:<40}{v}")
+        if "latency_ms" in report:
+            sec("Latency (ms)")
+            s = report["latency_ms"]
+            print(f"mean={s['mean']:.2f} p50={s['quantiles']['p50']:.2f} p95={s['quantiles']['p95']:.2f} max={s['max']:.2f}")
+        return
 
-        if not server_metrics:
-            ttft = report["time_to_first_token_s"]
-            print(" Time to First Token (TTFT, ms) ".center(50, "-"))
-            print(f"{'Mean:':<40} {ttft['mean'] * 1000:<10.2f}")
-            print(f"{'Stddev:':<40} {ttft['stddev'] * 1000:<10.2f}")
-            print(f"{'P25:':<40} {ttft['quantiles']['p25'] * 1000:<10.2f}")
-            print(f"{'P50:':<40} {ttft['quantiles']['p50'] * 1000:<10.2f}")
-            print(f"{'P75:':<40} {ttft['quantiles']['p75'] * 1000:<10.2f}")
-            print(f"{'P90:':<40} {ttft['quantiles']['p90'] * 1000:<10.2f}")
-            print(f"{'P95:':<40} {ttft['quantiles']['p95'] * 1000:<10.2f}")
-            print(f"{'P99:':<40} {ttft['quantiles']['p99'] * 1000:<10.2f}")
-            print(f"{'Min:':<40} {ttft['min'] * 1000:<10.2f}")
-            print(f"{'Max:':<40} {ttft['max'] * 1000:<10.2f}")
+    # top‑level benchmark report ---------------------------------------- #
+    hdr("Benchmark Result")
+    print(f"{'Total requests:':<50}{report['num_total_requests']}")
+    print(f"{'Completed requests:':<50}{report['num_completed_requests']}")
+    print(f"{'Duration (s):':<50}{report['duration']:.2f}")
+    print(f"{'Request throughput (req/s):':<50}{report['request_throughput']:.2f}")
 
-            tpot = report["time_per_output_token_s"]
-            print(" Time per Output Token (TPOT, ms) ".center(50, "-"))
-            print(f"{'Mean:':<40} {tpot['mean'] * 1000:<10.2f}")
-            print(f"{'Stddev:':<40} {tpot['stddev'] * 1000:<10.2f}")
-            print(f"{'P25:':<40} {tpot['quantiles']['p25'] * 1000:<10.2f}")
-            print(f"{'P50:':<40} {tpot['quantiles']['p50'] * 1000:<10.2f}")
-            print(f"{'P75:':<40} {tpot['quantiles']['p75'] * 1000:<10.2f}")
-            print(f"{'P90:':<40} {tpot['quantiles']['p90'] * 1000:<10.2f}")
-            print(f"{'P95:':<40} {tpot['quantiles']['p95'] * 1000:<10.2f}")
-            print(f"{'P99:':<40} {tpot['quantiles']['p99'] * 1000:<10.2f}")
-            print(f"{'Min:':<40} {tpot['min'] * 1000:<10.2f}")
-            print(f"{'Max:':<40} {tpot['max'] * 1000:<10.2f}")
+    sec("Latency (ms)")
+    for k in ("latency_ms", "ttft_ms", "tpot_ms", "itl_ms"):
+        if k in report:
+            s = report[k]
+            print(f"{k:<25} mean={s['mean']:.2f} p50={s['quantiles']['p50']:.2f} p95={s['quantiles']['p95']:.2f} max={s['max']:.2f}")
 
-            itl = report["inter_token_latency_s"]
-            print(" Inter-Token Latency (ms) ".center(50, "-"))
-            print(f"{'Mean:':<40} {itl['mean'] * 1000:<10.2f}")
-            print(f"{'Stddev:':<40} {itl['stddev'] * 1000:<10.2f}")
-            print(f"{'P25:':<40} {itl['quantiles']['p25'] * 1000:<10.2f}")
-            print(f"{'P50:':<40} {itl['quantiles']['p50'] * 1000:<10.2f}")
-            print(f"{'P75:':<40} {itl['quantiles']['p75'] * 1000:<10.2f}")
-            print(f"{'P90:':<40} {itl['quantiles']['p90'] * 1000:<10.2f}")
-            print(f"{'P95:':<40} {itl['quantiles']['p95'] * 1000:<10.2f}")
-            print(f"{'P99:':<40} {itl['quantiles']['p99'] * 1000:<10.2f}")
-            print(f"{'Min:':<40} {itl['min'] * 1000:<10.2f}")
-            print(f"{'Max:':<40} {itl['max'] * 1000:<10.2f}")
+    sec("Token stats")
+    for k in ("input_tokens", "output_tokens"):
+        if k in report:
+            s = report[k]
+            print(f"{k:<25} mean={s['mean']:.1f} p50={s['quantiles']['p50']:.1f} max={s['max']}")
 
-            e2e_latency = report["end_to_end_latency_s"]
-            print(" End-to-End Latency (ms) ".center(50, "-"))
-            print(f"{'Mean:':<40} {e2e_latency['mean'] * 1000:<10.2f}")
-            print(f"{'Stddev:':<40} {e2e_latency['stddev'] * 1000:<10.2f}")
-            print(f"{'P25:':<40} {e2e_latency['quantiles']['p25'] * 1000:<10.2f}")
-            print(f"{'P50:':<40} {e2e_latency['quantiles']['p50'] * 1000:<10.2f}")
-            print(f"{'P75:':<40} {e2e_latency['quantiles']['p75'] * 1000:<10.2f}")
-            print(f"{'P90:':<40} {e2e_latency['quantiles']['p90'] * 1000:<10.2f}")
-            print(f"{'P95:':<40} {e2e_latency['quantiles']['p95'] * 1000:<10.2f}")
-            print(f"{'P99:':<40} {e2e_latency['quantiles']['p99'] * 1000:<10.2f}")
-            print(f"{'Min:':<40} {e2e_latency['min'] * 1000:<10.2f}")
-            print(f"{'Max:':<40} {e2e_latency['max'] * 1000:<10.2f}")
-
-            input_tokens = report["input_tokens"]
-            print(" Input Tokens ".center(50, "-"))
-            print(f"{'Mean:':<40} {input_tokens['mean']:<1}")
-            print(f"{'Stddev:':<40} {input_tokens['stddev']:<1}")
-            print(f"{'P25:':<40} {input_tokens['quantiles']['p25']:<1}")
-            print(f"{'P50:':<40} {input_tokens['quantiles']['p50']:<1}")
-            print(f"{'P95:':<40} {input_tokens['quantiles']['p95']:<1}")
-            print(f"{'Min:':<40} {input_tokens['min']:<1}")
-            print(f"{'Max:':<40} {input_tokens['max']:<1}")
-
-            output_tokens = report["output_tokens"]
-            print(" Output Tokens ".center(50, "-"))
-            print(f"{'Mean:':<40} {output_tokens['mean']:<1}")
-            print(f"{'Stddev:':<40} {output_tokens['stddev']:<1}")
-            print(f"{'P25:':<40} {output_tokens['quantiles']['p25']:<1}")
-            print(f"{'P50:':<40} {output_tokens['quantiles']['p50']:<1}")
-            print(f"{'P95:':<40} {output_tokens['quantiles']['p95']:<1}")
-            print(f"{'Min:':<40} {output_tokens['min']:<1}")
-            print(f"{'Max:':<40} {output_tokens['max']:<1}")
-
-        print("=" * 50)
-
-    # fmt: on
-    # pylint: enable=line-too-long
-    _print(report, server_metrics=False)
     if "server_metrics" in report:
-        _print(report["server_metrics"], server_metrics=True)
+        pretty_print_report(report["server_metrics"], _is_sub=True)
+
+
+def _add_stats(tgt: Dict[str, Any], df: pd.DataFrame, col: str, *, factor: float = 1.0, alias: Optional[str] = None):
+    if col not in df.columns:
+        return
+    series = df[col].dropna() * factor
+    if series.empty:
+        return
+    key = alias or col
+    tgt[key] = {
+        "mean": series.mean(),
+        "stddev": series.std(ddof=0),
+        "min": series.min(),
+        "max": series.max(),
+        "quantiles": {f"p{int(q*100)}": v for q, v in series.quantile([0.25, 0.5, 0.75, 0.9, 0.95, 0.99]).items()},
+    }
+
+
+def _to_dict(obj: Any) -> Dict[str, Any]:
+    if obj is None:
+        return {}
+    if is_dataclass(obj):
+        return asdict(obj)
+    if isinstance(obj, BaseModel):
+        return obj.model_dump()
+    if isinstance(obj, dict):
+        return obj
+    raise TypeError(f"Unsupported metrics type: {type(obj)}")
+

@@ -23,7 +23,7 @@ from macos_bench.request_record import (
     generate_metrics_summary,
     pretty_print_report,
 )
-from macos_bench.macos_metrics import MacOSMetricsCollector
+from macos_bench.metrics import MetricsTask, Metrics
 
 import macos_bench.support.argparse as argparse
 import macos_bench.support.logging as logging
@@ -66,30 +66,21 @@ def run_pipeline(
     
     # Find the MLC server processes
     server_pid = None
-    # print("\nDebug: Looking for inference server process...")
-    # print(f"Debug: Target port: {args.port}")
-    
-    # First try to find by port
     try:
         import subprocess
         result = subprocess.run(['lsof', '-i', f':{args.port}'], capture_output=True, text=True)
         if result.stdout:
-            print(f"Debug: Found processes on port {args.port}:")
-            print(result.stdout)
-            # Parse lsof output to get PIDs
             for line in result.stdout.splitlines()[1:]:  # Skip header
                 parts = line.split()
                 if len(parts) >= 2:
                     pid = int(parts[1])
                     server_pid = pid
-                    print(f"Debug: Found PID {pid} for inference server")
+                    logger.info(f"Found PID {pid} for inference server")
     except Exception as e:
-        print(f"Debug: Error running lsof: {e}")
+        logger.warning(f"Error running lsof: {e}")
     
     if not server_pid:
-        print(f"\nWarning: Could not find inference server process on port {args.port}")
-        # print("Make sure the server is running with: python3 -m mlc_llm serve ...")
-        print(f"Debug: Try running 'lsof -i :{args.port}' to verify the port")
+        logger.warning(f"Could not find inference server process on port {args.port}")
 
     request_records = dataset.generate_request_records(
         args.input_len,
@@ -98,23 +89,9 @@ def run_pipeline(
         args.output_len_std,
     )
     
-    # Initialize metrics collector with server PID
-    metrics_collector = MacOSMetricsCollector(server_pid)
-    
-    # Start metrics collection thread
-    import threading
-    import time
-    
-    stop_collection = threading.Event()
-    
-    def collect_metrics_periodically():
-        while not stop_collection.is_set():
-            metrics_collector.collect_metrics()
-            time.sleep(1.0)  # Collect every second
-    
-    # Start collection thread
-    collection_thread = threading.Thread(target=collect_metrics_periodically)
-    collection_thread.start()
+    # Initialize metrics task with server PID
+    metrics_task = MetricsTask(pid=server_pid)
+    metrics_task.start()
     
     try:
         # Process all requests
@@ -129,13 +106,26 @@ def run_pipeline(
             assert request_record.request_id is not None
             assert sorted_requests[request_record.request_id] is None
             sorted_requests[request_record.request_id] = request_record
+            
+            # Record metrics for each request
+            metrics = Metrics(
+                success=request_record.metrics.success,
+                start_time=request_record.metrics.start_time,
+                finish_time=request_record.metrics.finish_time,
+                end_to_end_latency_s=request_record.metrics.end_to_end_latency_s,
+                input_tokens=request_record.metrics.input_tokens,
+                output_tokens=request_record.metrics.output_tokens,
+                time_to_first_token_s=request_record.metrics.time_to_first_token_s,
+                system_metrics=request_record.metrics.system_metrics,
+            )
+            metrics_task.add_request_metrics(metrics)
+            
     finally:
-        # Stop metrics collection
-        stop_collection.set()
-        collection_thread.join()
+        metrics_task.stop()
 
-    # Get final metrics
-    final_metrics = metrics_collector.collect_metrics()
+    # Get final metrics summary
+    metrics_summary = metrics_task.get_summary()
+    print(metrics_summary)
     
     request_records = MetricAnalyzer(tokenizer)(request_records)
     report = generate_metrics_summary(request_records, num_total_requests, args.num_gpus)
@@ -143,7 +133,7 @@ def run_pipeline(
     # Add system metrics to the report
     if "server_metrics" not in report:
         report["server_metrics"] = {}
-    report["server_metrics"].update(final_metrics)
+    report["server_metrics"].update(metrics_summary)
     
     return report, sorted_requests
 

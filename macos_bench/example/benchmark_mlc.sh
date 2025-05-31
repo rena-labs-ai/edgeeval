@@ -22,7 +22,7 @@ sudo python3 -m macos_bench \
   --dataset sharegpt \
   --dataset-path $SHAREGPT_PATH \
   --tokenizer $TOKENIZER_NAME \
-  --num-request 5 \
+  --num-request 3 \
   --num-gpus 1 \
   --num-concurrent-requests 1,2 \
   --host $SERVER_ADDR \
