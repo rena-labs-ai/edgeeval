@@ -9,11 +9,24 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from statistics import mean, pstdev
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
 
 import psutil
 
-@dataclass
-class SystemMetrics:
+class ServerMetrics(BaseModel):
+    input_tokens: int
+    prefill_tokens: int
+    output_tokens: int
+    end_to_end_latency_s: float
+    prefill_tokens_per_s: float
+    inter_token_latency_s: float
+    time_per_output_token_s: float
+    time_to_first_token_s: Optional[float] = None
+    system_metrics: Optional[SystemMetrics] = None
+
+
+class SystemMetrics(BaseModel):
     cpu_usage_avg: float = 0.0
     cpu_usage_peak: float = 0.0
     cpu_usage_stddev: float = 0.0
@@ -36,24 +49,21 @@ class SystemMetrics:
     gpu_freq_avg_mhz: Optional[float] = None
     gpu_freq_peak_mhz: Optional[float] = None
     gpu_freq_stddev_mhz: Optional[float] = None
+    
+class Metrics(BaseModel):
+    success: bool
+    start_time: float
+    finish_time: float
+    end_to_end_latency_s: float
 
-@dataclass
-class Metrics:
-    """End-user perspective metrics for a single inference request."""
-
-    success: bool = True
-    start_time: float = 0.0
-    finish_time: float = 0.0
-    end_to_end_latency_s: float = 0.0
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    inter_token_latency_s: Optional[float] = None
+    time_per_output_token_s: Optional[float] = None
     time_to_first_token_s: Optional[float] = None
-
-    # Optional fine‑grained data from the server.
     system_metrics: Optional[SystemMetrics] = None
-
-    # Optional benchmark‑specific feature vector (prompt length, model name …).
     exec_feature: Optional[Dict[str, Any]] = None
+
 
 class BaseMetricsCollector(ABC):
     """Abstract base class implemented by every concrete metrics collector."""
@@ -147,7 +157,6 @@ class MacOSMetricsCollector(BaseMetricsCollector):
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        print("Starting GPU metrics collector")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -213,7 +222,6 @@ class MetricsTask:
 
     def __init__(self, pid: Optional[int] = None):
         self._collectors: List[BaseMetricsCollector] = self._select_collectors(pid)
-        print(f"Collectors: {self._collectors}")
         self._request_metrics: List[Metrics] = []
 
     def start(self):

@@ -1,12 +1,3 @@
-"""MLC LLM Bench – request records, aggregation, and pretty‑printing.
-
-Interfaces preserved exactly as before (`RequestRecord`, `ServerMetrics`,
-`Metrics`, `generate_metrics_summary`, `convert_reports_to_df`,
-`pretty_print_report`).  Internally, we now tolerate both *pydantic* models and
-*dataclass* instances for the `metrics` field by converting either form to a
-plain dict via `_to_dict`.
-"""
-
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
@@ -15,35 +6,10 @@ from typing import Any, Dict, List, Optional
 import pandas as pd  # pylint: disable=import-error
 from pydantic import BaseModel, Field
 
-from macos_bench.metrics import Metrics as ClientMetrics, SystemMetrics  # dataclass
+from macos_bench.metrics import Metrics, ServerMetrics  # dataclass
 from macos_bench.protocol.openai_api_protocol import ChatCompletionRequest
 
 
-class ServerMetrics(BaseModel):
-    input_tokens: int
-    prefill_tokens: int
-    output_tokens: int
-    end_to_end_latency_s: float
-    prefill_tokens_per_s: float
-    inter_token_latency_s: float
-    time_per_output_token_s: float
-    time_to_first_token_s: Optional[float] = None
-    system_metrics: Optional[SystemMetrics] = None
-
-
-class Metrics(BaseModel):  # legacy pydantic wrapper when needed
-    success: bool
-    start_time: float
-    finish_time: float
-    end_to_end_latency_s: float
-
-    input_tokens: Optional[int] = None
-    output_tokens: Optional[int] = None
-    inter_token_latency_s: Optional[float] = None
-    time_per_output_token_s: Optional[float] = None
-    time_to_first_token_s: Optional[float] = None
-    system_metrics: Optional[SystemMetrics] = None
-    exec_feature: Optional[Dict[str, Any]] = None
 
 
 class RequestRecord(BaseModel):
@@ -54,7 +20,7 @@ class RequestRecord(BaseModel):
     timestamp: Optional[float] = None
 
     # Accept either the dataclass Metrics or the pydantic wrapper.
-    metrics: Optional[ClientMetrics] | Optional[Metrics] = Field(default=None)
+    metrics: Optional[Metrics] = None
     server_metrics: Optional[ServerMetrics] = None
     error_msg: Optional[str] = None
 
@@ -144,51 +110,97 @@ def convert_reports_to_df(reports: List[Dict[str, Any]]) -> pd.DataFrame:
 
 def pretty_print_report(report: Dict[str, Any], *, _is_sub: bool = False) -> None:  # noqa: C901
     """Pretty console output.  When called recursively for server_metrics,
-    `_is_sub` is True so we switch to a simpler layout that doesn’t expect
-    top‑level request counters.
+    `_is_sub` is True so we switch to a simpler layout that doesn't expect
+    top-level request counters.
     """
 
     def hdr(t: str):
-        print(f" {t} ".center(80, "="))
+        print(f" {t} ".center(60, "="))
 
     def sec(t: str):
-        print(t.center(80, "-"))
+        print(t.center(60, "-"))
 
     if _is_sub or "num_total_requests" not in report:
-        # sub‑report: just dump scalar fields and latency if present
-        hdr("Server Metrics")
+        hdr("System Metrics")
+
+        def _kv(label: str, value: Optional[float], unit: str = "") -> None:
+            txt = f"{value:>8.2f}{unit}" if value is not None else "   –"
+            print(f"  {label:<24}{txt}")
+
         for k, v in report.items():
             if isinstance(v, dict):
                 continue
-            if isinstance(v, SystemMetrics):
-                print(f"CPU usage avg: {v.cpu_usage_avg}, peak: {v.cpu_usage_peak}, stddev: {v.cpu_usage_stddev}")
-                print(f"RSS avg: {v.rss_avg_mb}, peak: {v.rss_peak_mb}, stddev: {v.rss_stddev_mb}")
-                print(f"VMS avg: {v.vms_avg_mb}, peak: {v.vms_peak_mb}, stddev: {v.vms_stddev_mb}")
-            print(f"{k:<40}{v}")
-        if "latency_ms" in report:
-            sec("Latency (ms)")
-            s = report["latency_ms"]
-            print(f"mean={s['mean']:.2f} p50={s['quantiles']['p50']:.2f} p95={s['quantiles']['p95']:.2f} max={s['max']:.2f}")
+            if k == "ProcessMetricsCollector":
+                sec("CPU (%)")
+                _kv("avg",   v.cpu_usage_avg)
+                _kv("peak",  v.cpu_usage_peak)
+                _kv("stddev", v.cpu_usage_stddev)
+
+                sec("Memory RSS (MB)")
+                _kv("avg",   v.rss_avg_mb)
+                _kv("peak",  v.rss_peak_mb)
+                _kv("stddev", v.rss_stddev_mb)
+
+                sec("Memory VMS (MB)")
+                _kv("avg",   v.vms_avg_mb)
+                _kv("peak",  v.vms_peak_mb)
+                _kv("stddev", v.vms_stddev_mb)
+                
+            if k == "MacOSMetricsCollector":
+                sec("GPU (%)")
+                _kv("avg",   v.gpu_usage_avg)
+                _kv("peak",  v.gpu_usage_peak)
+                _kv("stddev", v.gpu_usage_stddev)
+
+                sec("GPU freq (MHz)")
+                _kv("avg",   v.gpu_freq_avg_mhz)
+                _kv("peak",  v.gpu_freq_peak_mhz)
+                _kv("stddev", v.gpu_freq_stddev_mhz)
+
         return
 
-    # top‑level benchmark report ---------------------------------------- #
-    hdr("Benchmark Result")
+    hdr("Request Metrics")
     print(f"{'Total requests:':<50}{report['num_total_requests']}")
     print(f"{'Completed requests:':<50}{report['num_completed_requests']}")
     print(f"{'Duration (s):':<50}{report['duration']:.2f}")
     print(f"{'Request throughput (req/s):':<50}{report['request_throughput']:.2f}")
 
-    sec("Latency (ms)")
-    for k in ("latency_ms", "ttft_ms", "tpot_ms", "itl_ms"):
-        if k in report:
+    if any(k in report for k in ("latency_ms", "ttft_ms", "tpot_ms", "itl_ms")):
+        sec("Latency (ms)")
+        print(f"{'metric':<10} {'mean':>8} {'p50':>8} {'p95':>8} {'max':>8}")
+        for k, label in [
+            ("latency_ms", "e2e"),
+            ("ttft_ms",    "ttft"),
+            ("tpot_ms",    "tpot"),
+            ("itl_ms",     "itl"),
+        ]:
+            if k not in report:
+                continue
             s = report[k]
-            print(f"{k:<25} mean={s['mean']:.2f} p50={s['quantiles']['p50']:.2f} p95={s['quantiles']['p95']:.2f} max={s['max']:.2f}")
+            print(
+                f"{label:<12}"
+                f"{s['mean']:>9.2f}"
+                f"{s['quantiles']['p50']:>9.2f}"
+                f"{s['quantiles']['p95']:>9.2f}"
+                f"{s['max']:>9.2f}"
+            )
 
-    sec("Token stats")
-    for k in ("input_tokens", "output_tokens"):
-        if k in report:
+    if any(k in report for k in ("input_tokens", "output_tokens")):
+        sec("Token stats")
+        print(f"{'metric':<10} {'mean':>8} {'p50':>8} {'max':>8}")
+        for k, label in [
+            ("input_tokens",  "input"),
+            ("output_tokens", "output"),
+        ]:
+            if k not in report:
+                continue
             s = report[k]
-            print(f"{k:<25} mean={s['mean']:.1f} p50={s['quantiles']['p50']:.1f} max={s['max']}")
+            print(
+                f"{label:<12}"
+                f"{s['mean']:>9.1f}"
+                f"{s['quantiles']['p50']:>9.1f}"
+                f"{s['max']:>9}"
+            )
 
     if "server_metrics" in report:
         pretty_print_report(report["server_metrics"], _is_sub=True)
