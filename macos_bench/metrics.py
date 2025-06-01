@@ -145,7 +145,7 @@ class ProcessMetricsCollector(BaseMetricsCollector):
             time.sleep(self._interval_s)
 
 
-class MacOSMetricsCollector(BaseMetricsCollector):
+class MetalMetricsCollector(BaseMetricsCollector):
 
     def __init__(self, interval_s: float = 0.5):
         self._interval_s = interval_s
@@ -218,7 +218,7 @@ class MacOSMetricsCollector(BaseMetricsCollector):
         
 
 class MetricsTask:
-    """Coordinates multiple collectors and aggregates a *single* JSON summary."""
+    """Coordinates multiple collectors and aggregates a single JSON summary."""
 
     def __init__(self, pid: Optional[int] = None):
         self._collectors: List[BaseMetricsCollector] = self._select_collectors(pid)
@@ -269,7 +269,7 @@ class MetricsTask:
         collectors: List[BaseMetricsCollector] = [ProcessMetricsCollector(pid=pid)]
 
         if plat == "darwin" and arch.startswith("arm"):
-            collectors.append(MacOSMetricsCollector())
+            collectors.append(MetalMetricsCollector())
 
         return collectors
 

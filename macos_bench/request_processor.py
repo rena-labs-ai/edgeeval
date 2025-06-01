@@ -226,8 +226,6 @@ class MetricAnalyzer(RequestProcessor):  # pylint: disable=too-few-public-method
                 assert request_record.error_msg is not None
                 continue
             
-            # print(f"Request record: {request_record}")
-
             # If we already have token counts from Ollama, use those
             if metrics.output_tokens is not None and metrics.input_tokens is not None:
                 # Calculate first chunk tokens using tokenizer if available

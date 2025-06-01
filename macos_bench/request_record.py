@@ -146,7 +146,7 @@ def pretty_print_report(report: Dict[str, Any], *, _is_sub: bool = False) -> Non
                 _kv("peak",  v.vms_peak_mb)
                 _kv("stddev", v.vms_stddev_mb)
                 
-            if k == "MacOSMetricsCollector":
+            if k == "MetalMetricsCollector":
                 sec("GPU (%)")
                 _kv("avg",   v.gpu_usage_avg)
                 _kv("peak",  v.gpu_usage_peak)

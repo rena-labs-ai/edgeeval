@@ -505,10 +505,7 @@ class OllamaEndPoint(APIEndPoint):
                 "num_predict": request_record.chat_cmpl.max_tokens
             }
         }
-        
-        # print(f"Sending request to Ollama with model {model_name}")
-        # print(f"Request payload: {json.dumps(payload, indent=2)}")
-        
+
         generated_text = ""
         first_chunk_output_str = ""
         time_to_first_token_s = None

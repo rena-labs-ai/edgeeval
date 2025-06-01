@@ -136,11 +136,9 @@ class MacOSMetricsCollector:
                 "gpu_freq_stddev_mhz": gpu_freq_stddev
             }
             
-            # print("[Debug] Current metrics:", json.dumps(metrics, indent=2))
             return metrics
             
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-            # print(f"Warning: Could not collect metrics for process {self.server_pid}: {e}")
             return self._get_empty_metrics()
     
     def _get_empty_metrics(self):
@@ -171,11 +169,7 @@ class MacOSMetricsCollector:
             memory_info = self.server_process.memory_info()
             rss_mb = memory_info.rss / (1024 * 1024)  # Convert to MB
             vms_mb = memory_info.vms / (1024 * 1024)  # Convert to MB
-            
-            # print(f"[Debug] Process CPU usage: {process_cpu}%")
-            # print(f"[Debug] Process RSS memory: {rss_mb:.2f} MB")
-            # print(f"[Debug] Process Virtual memory: {vms_mb:.2f} MB")
-            
+
             return {
                 'process_cpu': process_cpu,
                 'rss_mb': rss_mb,
@@ -194,7 +188,6 @@ class MacOSMetricsCollector:
         try:
             cmd = ["sudo", "powermetrics", "-s", "gpu_power", "-i", "100", "-n", "1"]
             result = subprocess.run(cmd, capture_output=True, text=True)
-            # print("[Debug] GPU powermetrics result:", result.stdout)
             
             metrics = {
                 'active_pct': 0.0,
@@ -215,7 +208,6 @@ class MacOSMetricsCollector:
                         except (ValueError, IndexError):
                             pass
             
-            # print(f"[Debug] Parsed GPU metrics:", json.dumps(metrics, indent=2))
             return metrics
             
         except Exception as e:

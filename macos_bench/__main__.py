@@ -125,7 +125,6 @@ def run_pipeline(
 
     # Get final metrics summary
     metrics_summary = metrics_task.get_summary()
-    print(metrics_summary)
     
     request_records = MetricAnalyzer(tokenizer)(request_records)
     report = generate_metrics_summary(request_records, num_total_requests, args.num_gpus)
