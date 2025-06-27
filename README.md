@@ -15,11 +15,12 @@ A comprehensive profiling toolkit for analyzing performance metrics and resource
 ```
 profile_generation/           # Runtime profiling data collection
 ├── inference_backend/        # Backend-specific profiling modules
-│   ├── Ollama/              # Ollama inference backend profiling
-│   └── vLLM/                # vLLM inference backend profiling
-└── system_profiling/         # System-level metrics monitoring
-    ├── Apple_Silicon/        # macOS/Apple Silicon monitoring scripts
-    └── NVIDIA/               # NVIDIA GPU monitoring utilities
+│   ├── Ollama/               # Ollama inference backend profiling
+│   └── vLLM/                 # vLLM inference backend profiling
+├── system_profiling/         # System-level metrics monitoring
+│   ├── Apple_Silicon/        # macOS/Apple Silicon monitoring scripts
+│   └── NVIDIA/               # NVIDIA GPU monitoring utilities
+└── profile_rena.py           # The main script for profiling 
 
 profile_processing/           # Data analysis and visualization
 ├── data_processors/          # Raw data processing utilities
@@ -28,14 +29,20 @@ profile_processing/           # Data analysis and visualization
 ```
 
 ## Integration with Rena Runtime
-
-**Enable Profiling**: Add the `--profile` flag when running Rena Runtime
+1. Create a config for Rena core (See the rena core repository) along with the backend to profile and the model
+2. Enable rena core to collect request-level latencies for every LLM call and tool call
+3. Run `profile_rena.py` along with the following args:
+    - Inference backend path (e.g. `profile_generation/inference_backend/Ollama`)
+    - Path to the rena core directory
+    - Path to the rena core config file
+     
 
 ### How It Works
 
+The `profile_rena.py` script first starts system monitoring, spawns the inference backend with profiling enabled, and executes the user workflow in rena.
+
 1. **Automatic Platform Detection**: The system automatically detects whether you're running on Apple Silicon or NVIDIA hardware
-2. **Backend Configuration**: Based on your `config.json` in rena runtime, the profiler selects the appropriate backend module from `profile_generation/inference_backend/`
-3. **Background Monitoring**: System-level monitoring scripts start automatically, tracking:
+2. **Background Monitoring**: System-level monitoring scripts start automatically, tracking:
    - CPU and memory usage
    - GPU utilization
    - Power consumption
