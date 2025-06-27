@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Tuple, Dict
 import psutil
 import subprocess
@@ -10,66 +11,83 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 CWD = os.path.dirname(os.path.abspath(__file__))
 
 
-def _find_pid(substr: str, timeout: float = 5) -> int:
-    """
-    Return the first PID whose cmdline contains *substr*.
-    Raise RuntimeError if nothing turns up within *timeout* seconds.
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        for p in psutil.process_iter(["pid", "cmdline"]):
-            # p.info["cmdline"] can be None on zombie processes
-            if p.info["cmdline"] and substr in " ".join(p.info["cmdline"]):
-                return p.info["pid"]
-        time.sleep(0.2)
-
-    raise RuntimeError(f"Unable to locate process containing '{substr}'")
+def record_ollam_cpu_utilization(ollama_gid: int, results_dir: str) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        ["./cpu/gid.sh", str(ollama_gid), "0.2", results_dir, "ollama"],
+        cwd=CWD
+    )
+    return proc
 
 
-def record_cpu_utilization(results_dir: str) -> Tuple[int, subprocess.Popen]:
-    proc = subprocess.Popen(["./record_cpu_compute.sh", results_dir], cwd=CWD)
-    pid = _find_pid("record_cpu_compute")
-    return pid, proc
+def record_renacore_cpu_utilization(renacore_gid: int, results_dir: str) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        ["./cpu/gid.sh", str(renacore_gid), "0.2", results_dir, "renacore"],
+        cwd=CWD
+    )
+    return proc
 
 
-def record_cpu_bandwidth(results_dir: str) -> Tuple[int, subprocess.Popen]:
+def record_cpu_bandwidth(results_dir: str) -> subprocess.Popen:
     proc = subprocess.Popen(["./record_cpu_mem_bw.sh", results_dir], cwd=CWD)
-    pid = _find_pid("pcm-memory")
-    return pid, proc
+    return proc
 
 
-def record_gpu_utilization(results_dir: str) -> Tuple[int, subprocess.Popen]:
+def record_gpu_utilization(results_dir: str) -> subprocess.Popen:
     proc = subprocess.Popen(
         ["./record_gpu_mem_compute.sh", results_dir], cwd=CWD)
-    pid = _find_pid("dcgmi")
-    return pid, proc
+    return proc
 
 
-def record_power(results_dir) -> Tuple[int, subprocess.Popen]:
+def record_power(results_dir) -> subprocess.Popen:
     proc = subprocess.Popen(["./record_power.sh", results_dir], cwd=CWD)
-    pid = _find_pid("record_power")
-    return pid, proc
+    return proc
 
 
-def start_all(results_dir: str) -> Dict[str, int]:
+def start_all(ollama_gid, renacore_gid, results_dir: str) -> Dict[str, subprocess.Popen]:
     """
     Launch every collector and return a dict of PIDs so you can
     stop them later exactly like in the README.
     """
     pids = {}
-    pids["cpu_usage"], _ = record_cpu_utilization(results_dir)
-    pids["cpu_bw"],   _ = record_cpu_bandwidth(results_dir)
-    pids["gpu_util"], _ = record_gpu_utilization(results_dir)
-    pids["power"],    _ = record_power(results_dir)
+    # pids["cpu_usage"] = record_cpu_utilization(results_dir)
+    pids["cpu_usage_ollama"] = record_ollam_cpu_utilization(
+        ollama_gid, results_dir)
+    pids["cpu_usage_renacore"] = record_renacore_cpu_utilization(
+        renacore_gid, results_dir)
+    pids["cpu_bw"] = record_cpu_bandwidth(results_dir)
+    pids["gpu_util"] = record_gpu_utilization(results_dir)
+    pids["power"] = record_power(results_dir)
     return pids
 
 
-def stop_all(pids: Dict[str, int]) -> None:
+def stop_all(pids: Dict[str, subprocess.Popen]) -> None:
     """
-    Kill every collector with the right privilege level
-    (mirrors the README kill commands).
+    Gracefully terminate every collector process:
+    1. Send SIGTERM to allow clean shutdown.
+    2. Wait briefly.
+    3. Send SIGKILL if still running.
     """
-    def _kill(pid: int, sudo: bool = False):
+    def _terminate(pid: int, sudo: bool = True):
+        # Step 1: Try to terminate gracefully
+        if sudo:
+            subprocess.run(["sudo", "kill", str(pid)],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return  # Already gone
+
+        # Step 2: Wait up to 2 seconds for the process to exit
+        for _ in range(10):
+            try:
+                os.kill(pid, 0)  # Check if still alive
+                time.sleep(0.2)
+            except ProcessLookupError:
+                return  # Process exited
+
+        # Step 3: Force kill if still alive
         if sudo:
             subprocess.run(["sudo", "kill", "-9", str(pid)],
                            stdout=subprocess.DEVNULL,
@@ -78,11 +96,7 @@ def stop_all(pids: Dict[str, int]) -> None:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
-                pass
+                pass  # Already exited
 
-    _kill(pids.get("cpu_usage", 0))                   # kill -9 $cpu_usage_pid
-    # sudo kill -9 $cpu_mem_bw_pid
-    _kill(pids.get("cpu_bw", 0), sudo=True)
-    # kill -9 $gpu_utilization_pid
-    _kill(pids.get("gpu_util", 0))
-    _kill(pids.get("power", 0),    sudo=True)         # sudo kill -9 $power_pid
+    for key in pids:
+        _terminate(pids[key].pid)

@@ -56,6 +56,10 @@ def send_renacore_request(renacore_dir: str, prompt: str) -> subprocess.Popen:
     return proc
 
 
+def _find_gid(proc: subprocess.Popen) -> int:
+    return os.getpgid(proc.pid)
+
+
 def main():
     args = get_args()
 
@@ -63,7 +67,6 @@ def main():
     if not os.path.exists(args.results_dir):
         os.makedirs(args.results_dir)
     abs_results_dir = os.path.abspath(args.results_dir)
-    nvidia_pids = NVIDIA.start_all(abs_results_dir)
     renacore_proc = None
 
     # TODO: how to wait for Ollama server to be ready?
@@ -71,6 +74,9 @@ def main():
     renacore_proc = send_renacore_request(
         args.renacore_path, "Analysis of iris dataset")
 
+    ollama_gid = _find_gid(ollama_proc)
+    renacore_gid = _find_gid(renacore_proc)
+    nvidia_pids = NVIDIA.start_all(ollama_gid, renacore_gid, abs_results_dir)
     print("Profiling in progress — press Ctrl-C to stop.")
     try:
         signal.pause()
