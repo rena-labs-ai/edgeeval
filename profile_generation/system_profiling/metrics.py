@@ -275,13 +275,3 @@ class MetricsTask:
             collectors.append(DRAMCollector(pgid=pgid, interval_s=0.1))
 
         return collectors
-
-# if __name__ == "__main__":
-#     pgid = 538786
-#     results_dir = "results"
-#     task = MetricsTask(pgid=pgid, results_dir=results_dir)
-#     task.start()
-#     time.sleep(10)
-#     task.stop()
-#     print(task.get_summary())
-#     task.store_metrics()
