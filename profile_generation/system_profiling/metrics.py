@@ -14,7 +14,27 @@ from pydantic import BaseModel
 
 import psutil
 
-class ServerMetrics(BaseModel):
+def get_process_group_processes(pgid: int) -> List[psutil.Process]:
+    """Get all processes belonging to the process group."""
+    processes = []
+    try:
+        for proc in psutil.process_iter():
+            try:
+                # Use os.getpgid() to get the process group ID
+                if os.getpgid(proc.pid) == pgid:
+                    processes.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                # Process might have disappeared or we don't have permission
+                continue
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                print(f"Exception: {type(e).__name__}")
+                continue
+    except Exception:
+        pass
+    return processes
+
+
+class Metrics(BaseModel):
     system_metrics: Optional[SystemMetrics] = None
     # TODO: Add other platform-specific metrics such as power, GPU, etc.
 
@@ -29,60 +49,28 @@ class SystemMetrics(BaseModel):
 
 class BaseMetricsCollector(ABC):
     """Abstract base class implemented by every concrete metrics collector."""
+    def __init__(self, pgid: int, interval_s: float = 0.1):
+        self._pgid = pgid
+        self._interval_s = interval_s
 
     @abstractmethod
-    def start(self) -> None:
-        """Begin background sampling (non-blocking)."""
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Stop sampling and join any internal worker threads."""
+    def collect(self) -> Any:
+        """Collect metrics."""
 
     @abstractmethod
     def snapshot(self) -> Any:
         """Return a summary of all samples collected so far."""
 
+    @abstractmethod
+    def store_metrics(self, results_dir: str):
+        """Store metrics in files."""
 
-class SystemMetricsCollector(BaseMetricsCollector):
+class CPUCollector(BaseMetricsCollector):
     def __init__(self, pgid: int, interval_s: float = 0.1):
-        self._pgid = pgid
-        self._interval_s = interval_s
-        self._stop_evt = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
+        super().__init__(pgid, interval_s)
         self._cpu_samples: List[float] = []
         self._process_counts: List[int] = []
         self._individual_process_metrics: Dict[int, List[float]] = {}
-
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return  # already running
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_evt.set()
-        if self._thread:
-            self._thread.join()
-
-    def _get_process_group_processes(self) -> List[psutil.Process]:
-        """Get all processes belonging to the process group."""
-        processes = []
-        try:
-            for proc in psutil.process_iter():
-                try:
-                    # Use os.getpgid() to get the process group ID
-                    if os.getpgid(proc.pid) == self._pgid:
-                        processes.append(proc)
-                except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                    # Process might have disappeared or we don't have permission
-                    continue
-                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                    print(f"Exception: {type(e).__name__}")
-                    continue
-        except Exception:
-            pass
-        return processes
 
     def snapshot(self) -> SystemMetrics:
         if not self._cpu_samples:  # No samples collected – return zeroes.
@@ -121,38 +109,30 @@ class SystemMetricsCollector(BaseMetricsCollector):
         with open(os.path.join(results_dir, f"pgid_{self._pgid}_individual_processes.json"), "w") as f:
             json.dump(self._individual_process_metrics, f)
 
-    def _run(self):
+    def collect(self) -> Any:
         """Main sampling loop."""
-        while not self._stop_evt.is_set():
+        processes = get_process_group_processes(self._pgid)
+        total_cpu = 0.0
+        current_pids = set()
+        
+        for proc in processes:
             try:
-                processes = self._get_process_group_processes()
-                total_cpu = 0.0
-                current_pids = set()
+                cpu_percent = proc.cpu_percent()
+                total_cpu += cpu_percent
+                pid = proc.pid
+                current_pids.add(pid)
                 
-                for proc in processes:
-                    try:
-                        cpu_percent = proc.cpu_percent()
-                        total_cpu += cpu_percent
-                        pid = proc.pid
-                        current_pids.add(pid)
-                        
-                        # Track individual process metrics
-                        if pid not in self._individual_process_metrics:
-                            self._individual_process_metrics[pid] = []
-                        self._individual_process_metrics[pid].append(cpu_percent)
-                        
-                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                        print(f"Exception: {type(e).__name__}")
-                        continue
+                # Track individual process metrics
+                if pid not in self._individual_process_metrics:
+                    self._individual_process_metrics[pid] = []
+                self._individual_process_metrics[pid].append(cpu_percent)
                 
-                self._cpu_samples.append(total_cpu)
-                self._process_counts.append(len(processes))
-                
-            except Exception as e:
-                # Continue monitoring even if there are temporary errors
-                pass
-
-            time.sleep(self._interval_s)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                logging.error(f"Exception: {type(e).__name__}")
+                continue
+        
+        self._cpu_samples.append(total_cpu)
+        self._process_counts.append(len(processes))                
 
 
 class MetricsTask:
@@ -161,14 +141,24 @@ class MetricsTask:
     def __init__(self, pid: Optional[int] = None, pgid: Optional[int] = None, results_dir: Optional[str] = None):
         self._collectors: List[BaseMetricsCollector] = self._select_collectors(pid, pgid)
         self._results_dir = results_dir
+        self._stop_evt = threading.Event()
+        self._collection_threads: List[threading.Thread] = []
     
     def start(self):
         for c in self._collectors:
-            c.start()
+            t = threading.Thread(target=self._run, args=(c,), daemon=True)
+            self._collection_threads.append(t)
+            t.start()
 
-    def stop(self):
-        for c in self._collectors:
-            c.stop()
+    def stop(self) -> None:
+        self._stop_evt.set()
+        for t in self._collection_threads:            
+            t.join()
+
+    def _run(self, collector: BaseMetricsCollector):
+        while not self._stop_evt.is_set():
+            collector.collect()
+            time.sleep(collector._interval_s)
 
     def get_summary(self) -> Dict[str, Any]:
         """Return a JSON-serialisable dict with all aggregated numbers."""
@@ -179,18 +169,26 @@ class MetricsTask:
             key = col.__class__.__name__
             summary[key] = snap.dict()  # Convert Pydantic model to dict
 
-        return summary
+        for col in self._collectors:
+            col.store_metrics(self._results_dir)
 
-    def store_metrics(self):
-        if self._results_dir:
-            for col in self._collectors:
-                col.store_metrics(self._results_dir)
+        return summary
 
     @staticmethod
     def _select_collectors(pid: Optional[int], pgid: Optional[int]) -> List[BaseMetricsCollector]:
         collectors: List[BaseMetricsCollector] = []
         
         if pgid is not None:
-            collectors.append(SystemMetricsCollector(pgid=pgid, interval_s=0.1))
+            collectors.append(CPUCollector(pgid=pgid, interval_s=0.1))
             
         return collectors
+
+# if __name__ == "__main__":
+#     pgid = 538786
+#     results_dir = "results"
+#     task = MetricsTask(pgid=pgid, results_dir=results_dir)
+#     task.start()
+#     time.sleep(10)
+#     task.stop()
+#     print(task.get_summary())
+#     task.store_metrics()
