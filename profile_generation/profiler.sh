@@ -2,9 +2,9 @@
 
 browserd_path=/home/zhan/rena-labs/rena-core/rena-browserd
 trace_path=./trace.json
-config_path=/home/zhan/rena-labs/rena-core/examples/use-cases/hello-world-greeting/browserd.toml
-eval_path=/home/zhan/rena-labs/rena-core/examples/use-cases/hello-world-greeting/eval.toml
-results_dir=./results
+config_path=/home/zhan/rena-labs/rena-core/examples/use-cases/filesystem-manipulation/browserd.toml
+eval_path=/home/zhan/rena-labs/rena-core/examples/use-cases/filesystem-manipulation/eval.toml
+results_dir=./results/filesystem-manipulation
 
 python3 profiler.py \
     --browserd_path $browserd_path \

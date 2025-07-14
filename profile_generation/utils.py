@@ -2,6 +2,7 @@ import dpkt
 import json
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+import socket
 
 
 def ollama_get_tokens_breakdown(response, tokenizer):
@@ -90,7 +91,8 @@ def ollama_get_tokens_breakdown(response, tokenizer):
     
     formatted_string = serialize_json_to_string(response['message'])
     output_ids = tokenizer(formatted_string, return_tensors="pt").input_ids[0].tolist()
-    print(f"{formatted_string}")
+    print(f"response: {response}")
+    print(f"formatted_string: {formatted_string}")
 
     tool_call_tokens_count = ollama_get_tool_calls_tokens(output_ids)
 
@@ -103,7 +105,8 @@ def ollama_get_tokens_breakdown(response, tokenizer):
 
 class Ollama_pcap_iter:
     """
-    return: response
+    Iterator to parse HTTP responses from Ollama server in a pcap file,
+    handling TCP stream reassembly.
     """
 
     def __init__(self, pcap_file):
@@ -111,6 +114,9 @@ class Ollama_pcap_iter:
 
         f = open(pcap_file, 'rb')
         pcap = dpkt.pcap.Reader(f)
+
+        # Key: (src, sport, dst, dport), Value: bytearray buffer
+        buffers = {}
 
         responses = []
 
@@ -125,23 +131,44 @@ class Ollama_pcap_iter:
                     continue
 
                 tcp = ip.data
-                if tcp.dport == SERVER_PORT:
-                    continue  # client -> server
+                # Only process server -> client
                 if tcp.sport != SERVER_PORT:
-                    continue  # not server -> client
-
+                    continue
                 if len(tcp.data) == 0:
                     continue
 
-                try:
-                    http = dpkt.http.Response(tcp.data)
-                    body = http.body.strip()
-                    if body.startswith(b'{') or body.startswith(b'['):
-                        obj = json.loads(body.decode(errors='ignore'))
-                        responses.append(obj)
-                except (dpkt.UnpackError, ValueError):
-                    continue
+                # Identify the TCP stream by 4-tuple
+                stream_key = (
+                    socket.inet_ntoa(ip.src),
+                    tcp.sport,
+                    socket.inet_ntoa(ip.dst),
+                    tcp.dport
+                )
+                if stream_key not in buffers:
+                    buffers[stream_key] = bytearray()
+                buffers[stream_key] += tcp.data
 
+                # Try to parse as many HTTP responses as possible from the buffer
+                buf_ref = buffers[stream_key]
+                while True:
+                    try:
+                        http_resp = dpkt.http.Response(buf_ref)
+                        body = http_resp.body.strip()
+                        if body.startswith(b'{') or body.startswith(b'['):
+                            obj = json.loads(body.decode(errors='ignore'))
+                            responses.append(obj)
+                        # Remove the parsed response from the buffer
+                        parsed_len = len(http_resp)
+                        buf_ref = buf_ref[parsed_len:]
+                        buffers[stream_key] = buf_ref
+                        if not buf_ref:
+                            break
+                    except (dpkt.NeedData, dpkt.UnpackError):
+                        # Not enough data for a full response yet
+                        break
+                    except ValueError:
+                        # Not a valid JSON, skip
+                        break
             except Exception:
                 continue
 

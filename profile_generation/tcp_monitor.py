@@ -96,6 +96,7 @@ class OllamaTCPMonitor:
         
     def _parse_pcap(self):
         pcap_iter = Ollama_pcap_iter(self._pcap_file)
+        print(f"start parsing pcap, total {len(pcap_iter)} responses")
         for response in pcap_iter:
             tokens = ollama_get_tokens_breakdown(response, self.tokenizer)
             if tokens['tool_call_tokens'] >0:
